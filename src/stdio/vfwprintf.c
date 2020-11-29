@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <wchar.h>
 #include <inttypes.h>
 
@@ -52,6 +53,8 @@ static const unsigned char states[]['z'-'A'+1] = {
 	}, { /* 1: l-prefixed */
 		S('d') = LONG, S('i') = LONG,
 		S('o') = ULONG, S('u') = ULONG, S('x') = ULONG, S('X') = ULONG,
+		S('e') = DBL, S('f') = DBL, S('g') = DBL, S('a') = DBL,
+		S('E') = DBL, S('F') = DBL, S('G') = DBL, S('A') = DBL,
 		S('c') = INT, S('s') = PTR, S('n') = PTR,
 		S('l') = LLPRE,
 	}, { /* 2: ll-prefixed */
@@ -255,8 +258,11 @@ static int wprintf_core(FILE *f, const wchar_t *fmt, va_list *ap, union arg *nl_
 			}
 			continue;
 		case 'c':
+			if (w<1) w=1;
+			if (w>1 && !(fl&LEFT_ADJ)) fprintf(f, "%*s", w-1, "");
 			fputwc(btowc(arg.i), f);
-			l = 1;
+			if (w>1 && (fl&LEFT_ADJ)) fprintf(f, "%*s", w-1, "");
+			l = w;
 			continue;
 		case 'C':
 			fputwc(arg.i, f);

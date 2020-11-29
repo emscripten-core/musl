@@ -1,3 +1,5 @@
+#ifdef __EMSCRIPTEN__
+
 #include <pthread.h>
 #include "libc.h"
 #include "pthread_impl.h"
@@ -32,4 +34,6 @@ void __emscripten_pthread_data_constructor(void) {
   initPthreadsJS();
   pthread_self()->locale = &libc.global_locale;
 }
+#endif
+
 #endif

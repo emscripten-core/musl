@@ -1,6 +1,5 @@
 #include <unistd.h>
 #include "syscall.h"
-#include "libc.h"
 
 ssize_t pread(int fd, void *buf, size_t size, off_t ofs)
 {
@@ -19,4 +18,4 @@ ssize_t pread(int fd, void *buf, size_t size, off_t ofs)
 #endif
 }
 
-LFS64(pread);
+weak_alias(pread, pread64);

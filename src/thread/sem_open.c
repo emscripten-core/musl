@@ -11,16 +11,14 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include "libc.h"
-
-char *__shm_mapname(const char *, char *);
+#include "lock.h"
 
 static struct {
 	ino_t ino;
 	sem_t *sem;
 	int refcnt;
 } *semtab;
-static volatile int lock[2];
+static volatile int lock[1];
 
 #define FLAGS (O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK)
 
