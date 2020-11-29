@@ -63,7 +63,7 @@ static inline void unlock_requeue(volatile int *l, volatile int *r, int w)
 	emscripten_futex_wake(l, 0x7FFFFFFF);
 #else
 	if (w) __wake(l, 1, 1);
-	else __syscall(SYS_futex, l, FUTEX_REQUEUE|128, 0, 1, r) != -ENOSYS
+	else __syscall(SYS_futex, l, FUTEX_REQUEUE|FUTEX_PRIVATE, 0, 1, r) != -ENOSYS
 		|| __syscall(SYS_futex, l, FUTEX_REQUEUE, 0, 1, r);
 #endif
 }

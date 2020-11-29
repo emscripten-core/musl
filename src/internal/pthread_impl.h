@@ -42,7 +42,6 @@ struct pthread {
 	void *result;
 	struct __ptcb *cancelbuf;
 	void **tsd;
-	pthread_attr_t attr;
 	volatile int dead;
 	struct {
 		volatile void *volatile head;
@@ -116,6 +115,10 @@ struct __timer {
 #define DTP_OFFSET 0
 #endif
 
+#ifndef tls_mod_off_t
+#define tls_mod_off_t size_t
+#endif
+
 #define SIGTIMER 32
 #define SIGCANCEL 33
 #define SIGSYNCCALL 34
@@ -146,7 +149,7 @@ int __timedwait_cp(volatile int *, int, clockid_t, const struct timespec *, int)
 void __wait(volatile int *, volatile int *, int, int);
 static inline void __wake(volatile void *addr, int cnt, int priv)
 {
-	if (priv) priv = 128;
+	if (priv) priv = FUTEX_PRIVATE;
 	if (cnt<0) cnt = INT_MAX;
 #ifdef __EMSCRIPTEN__
 	emscripten_futex_wake(addr, (cnt)<0?INT_MAX:(cnt));
@@ -165,7 +168,7 @@ void __block_app_sigs(void *);
 void __restore_sigs(void *);
 
 #define DEFAULT_STACK_SIZE 81920
-#define DEFAULT_GUARD_SIZE PAGE_SIZE
+#define DEFAULT_GUARD_SIZE 4096
 
 #define __ATTRP_C11_THREAD ((void*)(uintptr_t)-1)
 

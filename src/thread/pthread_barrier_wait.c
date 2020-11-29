@@ -91,7 +91,7 @@ int pthread_barrier_wait(pthread_barrier_t *b)
 #ifdef __EMSCRIPTEN__
 			emscripten_futex_wait(&inst->finished, 1, INFINITY);
 #else
-			__syscall(SYS_futex,&inst->finished,FUTEX_WAIT|128,1,0) != -ENOSYS
+			__syscall(SYS_futex,&inst->finished,FUTEX_WAIT|FUTEX_PRIVATE,1,0) != -ENOSYS
 			|| __syscall(SYS_futex,&inst->finished,FUTEX_WAIT,1,0);
 #endif
 		}

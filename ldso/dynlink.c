@@ -59,17 +59,17 @@ struct dso {
 	Phdr *phdr;
 	int phnum;
 	size_t phentsize;
-	int refcnt;
 	Sym *syms;
-	uint32_t *hashtab;
+	Elf_Symndx *hashtab;
 	uint32_t *ghashtab;
 	int16_t *versym;
 	char *strings;
+	struct dso *syms_next, *lazy_next;
+	size_t *lazy, lazy_cnt;
 	unsigned char *map;
 	size_t map_len;
 	dev_t dev;
 	ino_t ino;
-	signed char global;
 	char relocated;
 	char constructed;
 	char kernel_mapped;
@@ -120,7 +120,7 @@ static struct builtin_tls {
 static size_t *saved_addends, *apply_addends_to;
 
 static struct dso ldso;
-static struct dso *head, *tail, *fini_head;
+static struct dso *head, *tail, *fini_head, *syms_tail, *lazy_head;
 static char *env_path, *sys_path;
 static unsigned long long gencnt;
 static int runtime;
@@ -136,6 +136,7 @@ static size_t static_tls_cnt;
 static pthread_mutex_t init_fini_lock = { ._m_type = PTHREAD_MUTEX_RECURSIVE };
 static struct fdpic_loadmap *app_loadmap;
 static struct fdpic_dummy_loadmap app_dummy_loadmap;
+static struct dso *const nodeps_dummy;
 
 struct debug *_dl_debug_addr = &debug;
 
@@ -213,7 +214,7 @@ static Sym *sysv_lookup(const char *s, uint32_t h, struct dso *dso)
 {
 	size_t i;
 	Sym *syms = dso->syms;
-	uint32_t *hashtab = dso->hashtab;
+	Elf_Symndx *hashtab = dso->hashtab;
 	char *strings = dso->strings;
 	for (i=hashtab[2+h%hashtab[0]]; i; i=hashtab[2+hashtab[0]+i]) {
 		if ((!dso->versym || dso->versym[i] >= 0)
@@ -265,19 +266,12 @@ static Sym *gnu_lookup_filtered(uint32_t h1, uint32_t *hashtab, struct dso *dso,
 
 static struct symdef find_sym(struct dso *dso, const char *s, int need_def)
 {
-	uint32_t h = 0, gh, gho, *ght;
-	size_t ghm = 0;
+	uint32_t h = 0, gh = gnu_hash(s), gho = gh / (8*sizeof(size_t)), *ght;
+	size_t ghm = 1ul << gh % (8*sizeof(size_t));
 	struct symdef def = {0};
-	for (; dso; dso=dso->next) {
+	for (; dso; dso=dso->syms_next) {
 		Sym *sym;
-		if (!dso->global) continue;
 		if ((ght = dso->ghashtab)) {
-			if (!ghm) {
-				gh = gnu_hash(s);
-				int maskbits = 8 * sizeof ghm;
-				gho = gh / maskbits;
-				ghm = 1ul << gh % maskbits;
-			}
 			sym = gnu_lookup_filtered(gh, ght, dso, s, gho, ghm);
 		} else {
 			if (!h) h = sysv_hash(s);
@@ -293,11 +287,9 @@ static struct symdef find_sym(struct dso *dso, const char *s, int need_def)
 				continue;
 		if (!(1<<(sym->st_info&0xf) & OK_TYPES)) continue;
 		if (!(1<<(sym->st_info>>4) & OK_BINDS)) continue;
-
-		if (def.sym && sym->st_info>>4 == STB_WEAK) continue;
 		def.sym = sym;
 		def.dso = dso;
-		if (sym->st_info>>4 == STB_GLOBAL) break;
+		break;
 	}
 	return def;
 }
@@ -333,27 +325,7 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 		if (skip_relative && IS_RELATIVE(rel[1], dso->syms)) continue;
 		type = R_TYPE(rel[1]);
 		if (type == REL_NONE) continue;
-		sym_index = R_SYM(rel[1]);
 		reloc_addr = laddr(dso, rel[0]);
-		if (sym_index) {
-			sym = syms + sym_index;
-			name = strings + sym->st_name;
-			ctx = type==REL_COPY ? head->next : head;
-			def = (sym->st_info&0xf) == STT_SECTION
-				? (struct symdef){ .dso = dso, .sym = sym }
-				: find_sym(ctx, name, type==REL_PLT);
-			if (!def.sym && (sym->st_shndx != SHN_UNDEF
-			    || sym->st_info>>4 != STB_WEAK)) {
-				error("Error relocating %s: %s: symbol not found",
-					dso->name, name);
-				if (runtime) longjmp(*rtld_fail, 1);
-				continue;
-			}
-		} else {
-			sym = 0;
-			def.sym = 0;
-			def.dso = dso;
-		}
 
 		if (stride > 2) {
 			addend = rel[2];
@@ -368,6 +340,34 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 			addend = saved_addends[save_slot++];
 		} else {
 			addend = *reloc_addr;
+		}
+
+		sym_index = R_SYM(rel[1]);
+		if (sym_index) {
+			sym = syms + sym_index;
+			name = strings + sym->st_name;
+			ctx = type==REL_COPY ? head->syms_next : head;
+			def = (sym->st_info&0xf) == STT_SECTION
+				? (struct symdef){ .dso = dso, .sym = sym }
+				: find_sym(ctx, name, type==REL_PLT);
+			if (!def.sym && (sym->st_shndx != SHN_UNDEF
+			    || sym->st_info>>4 != STB_WEAK)) {
+				if (dso->lazy && (type==REL_PLT || type==REL_GOT)) {
+					dso->lazy[3*dso->lazy_cnt+0] = rel[0];
+					dso->lazy[3*dso->lazy_cnt+1] = rel[1];
+					dso->lazy[3*dso->lazy_cnt+2] = addend;
+					dso->lazy_cnt++;
+					continue;
+				}
+				error("Error relocating %s: %s: symbol not found",
+					dso->name, name);
+				if (runtime) longjmp(*rtld_fail, 1);
+				continue;
+			}
+		} else {
+			sym = 0;
+			def.sym = 0;
+			def.dso = dso;
 		}
 
 		sym_val = def.sym ? (size_t)laddr(def.dso, def.sym->st_value) : 0;
@@ -456,6 +456,26 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 				dso->name, type);
 			if (runtime) longjmp(*rtld_fail, 1);
 			continue;
+		}
+	}
+}
+
+static void redo_lazy_relocs()
+{
+	struct dso *p = lazy_head, *next;
+	lazy_head = 0;
+	for (; p; p=next) {
+		next = p->lazy_next;
+		size_t size = p->lazy_cnt*3*sizeof(size_t);
+		p->lazy_cnt = 0;
+		do_relocs(p, p->lazy, size, 3);
+		if (p->lazy_cnt) {
+			p->lazy_next = lazy_head;
+			lazy_head = p;
+		} else {
+			free(p->lazy);
+			p->lazy = 0;
+			p->lazy_next = 0;
 		}
 	}
 }
@@ -912,27 +932,28 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 
 	/* Catch and block attempts to reload the implementation itself */
 	if (name[0]=='l' && name[1]=='i' && name[2]=='b') {
-		static const char *rp, reserved[] =
-			"c\0pthread\0rt\0m\0dl\0util\0xnet\0";
-		char *z = strchr(name, '.');
-		if (z) {
-			size_t l = z-name;
-			for (rp=reserved; *rp && strncmp(name+3, rp, l-3); rp+=strlen(rp)+1);
-			if (*rp) {
-				if (ldd_mode) {
-					/* Track which names have been resolved
-					 * and only report each one once. */
-					static unsigned reported;
-					unsigned mask = 1U<<(rp-reserved);
-					if (!(reported & mask)) {
-						reported |= mask;
-						dprintf(1, "\t%s => %s (%p)\n",
-							name, ldso.name,
-							ldso.base);
-					}
+		static const char reserved[] =
+			"c.pthread.rt.m.dl.util.xnet.";
+		const char *rp, *next;
+		for (rp=reserved; *rp; rp=next) {
+			next = strchr(rp, '.') + 1;
+			if (strncmp(name+3, rp, next-rp) == 0)
+				break;
+		}
+		if (*rp) {
+			if (ldd_mode) {
+				/* Track which names have been resolved
+				 * and only report each one once. */
+				static unsigned reported;
+				unsigned mask = 1U<<(rp-reserved);
+				if (!(reported & mask)) {
+					reported |= mask;
+					dprintf(1, "\t%s => %s (%p)\n",
+						name, ldso.name,
+						ldso.base);
 				}
-				is_self = 1;
 			}
+			is_self = 1;
 		}
 	}
 	if (!strcmp(name, ldso.name)) is_self = 1;
@@ -940,7 +961,7 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 		if (!ldso.prev) {
 			tail->next = &ldso;
 			ldso.prev = tail;
-			tail = ldso.next ? ldso.next : &ldso;
+			tail = &ldso;
 		}
 		return &ldso;
 	}
@@ -951,7 +972,6 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 		/* Search for the name to see if it's already loaded */
 		for (p=head->next; p; p=p->next) {
 			if (p->shortname && !strcmp(p->shortname, name)) {
-				p->refcnt++;
 				return p;
 			}
 		}
@@ -1014,13 +1034,23 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 			if (!p->shortname && pathname != name)
 				p->shortname = strrchr(p->name, '/')+1;
 			close(fd);
-			p->refcnt++;
 			return p;
 		}
 	}
 	map = noload ? 0 : map_library(fd, &temp_dso);
 	close(fd);
 	if (!map) return 0;
+
+	/* Avoid the danger of getting two versions of libc mapped into the
+	 * same process when an absolute pathname was used. The symbols
+	 * checked are chosen to catch both musl and glibc, and to avoid
+	 * false positives from interposition-hack libraries. */
+	decode_dyn(&temp_dso);
+	if (find_sym(&temp_dso, "__libc_start_main", 1).sym &&
+	    find_sym(&temp_dso, "stdin", 1).sym) {
+		unmap_library(&temp_dso);
+		return load_library("libc.so", needed_by);
+	}
 
 	/* Allocate storage for the new DSO. When there is TLS, this
 	 * storage must include a reservation for all pre-existing
@@ -1041,10 +1071,8 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
 		return 0;
 	}
 	memcpy(p, &temp_dso, sizeof temp_dso);
-	decode_dyn(p);
 	p->dev = st.st_dev;
 	p->ino = st.st_ino;
-	p->refcnt = 1;
 	p->needed_by = needed_by;
 	p->name = p->buf;
 	strcpy(p->name, pathname);
@@ -1105,6 +1133,7 @@ static void load_deps(struct dso *p)
 			}
 		}
 	}
+	if (!*deps) *deps = (struct dso **)&nodeps_dummy;
 }
 
 static void load_preload(char *s)
@@ -1121,9 +1150,24 @@ static void load_preload(char *s)
 	}
 }
 
-static void make_global(struct dso *p)
+static void add_syms(struct dso *p)
 {
-	for (; p; p=p->next) p->global = 1;
+	if (!p->syms_next && syms_tail != p) {
+		syms_tail->syms_next = p;
+		syms_tail = p;
+	}
+}
+
+static void revert_syms(struct dso *old_tail)
+{
+	struct dso *p, *next;
+	/* Chop off the tail of the list of dsos that participate in
+	 * the global symbol table, reverting them to RTLD_LOCAL. */
+	for (p=old_tail; p; p=next) {
+		next = p->syms_next;
+		p->syms_next = 0;
+	}
+	syms_tail = old_tail;
 }
 
 static void do_mips_relocs(struct dso *p, size_t *got)
@@ -1263,7 +1307,7 @@ void __init_tls(size_t *auxv)
 }
 
 __attribute__((__visibility__("hidden")))
-void *__tls_get_new(size_t *v)
+void *__tls_get_new(tls_mod_off_t *v)
 {
 	pthread_t self = __pthread_self();
 
@@ -1352,7 +1396,6 @@ void __dls2(unsigned char *base, size_t *sp)
 	}
 	Ehdr *ehdr = (void *)ldso.base;
 	ldso.name = ldso.shortname = "libc.so";
-	ldso.global = 1;
 	ldso.phnum = ehdr->e_phnum;
 	ldso.phdr = laddr(&ldso, ehdr->e_phoff);
 	ldso.phentsize = ehdr->e_phentsize;
@@ -1401,6 +1444,7 @@ _Noreturn void __dls3(size_t *sp)
 	size_t aux[AUX_CNT], *auxv;
 	size_t i;
 	char *env_preload=0;
+	char *replace_argv0=0;
 	size_t vdso_base;
 	int argc = *sp;
 	char **argv = (void *)(sp+1);
@@ -1485,6 +1529,10 @@ _Noreturn void __dls3(size_t *sp)
 				if (opt[7]=='=') env_preload = opt+8;
 				else if (opt[7]) *argv = 0;
 				else if (*argv) env_preload = *argv++;
+			} else if (!memcmp(opt, "argv0", 5)) {
+				if (opt[5]=='=') replace_argv0 = opt+6;
+				else if (opt[5]) *argv = 0;
+				else if (*argv) replace_argv0 = *argv++;
 			} else {
 				argv[0] = 0;
 			}
@@ -1540,7 +1588,6 @@ _Noreturn void __dls3(size_t *sp)
 #endif
 		tls_align = MAXP2(tls_align, app.tls.align);
 	}
-	app.global = 1;
 	decode_dyn(&app);
 	if (DL_FDPIC) {
 		makefuncdescs(&app);
@@ -1555,8 +1602,22 @@ _Noreturn void __dls3(size_t *sp)
 		argv[-3] = (void *)app.loadmap;
 	}
 
-	/* Attach to vdso, if provided by the kernel */
-	if (search_vec(auxv, &vdso_base, AT_SYSINFO_EHDR)) {
+	/* Initial dso chain consists only of the app. */
+	head = tail = syms_tail = &app;
+
+	/* Donate unused parts of app and library mapping to malloc */
+	reclaim_gaps(&app);
+	reclaim_gaps(&ldso);
+
+	/* Load preload/needed libraries, add symbols to global namespace. */
+	if (env_preload) load_preload(env_preload);
+ 	load_deps(&app);
+	for (struct dso *p=head; p; p=p->next)
+		add_syms(p);
+
+	/* Attach to vdso, if provided by the kernel, last so that it does
+	 * not become part of the global namespace.  */
+	if (search_vec(auxv, &vdso_base, AT_SYSINFO_EHDR) && vdso_base) {
 		Ehdr *ehdr = (void *)vdso_base;
 		Phdr *phdr = vdso.phdr = (void *)(vdso_base + ehdr->e_phoff);
 		vdso.phnum = ehdr->e_phnum;
@@ -1569,25 +1630,12 @@ _Noreturn void __dls3(size_t *sp)
 		}
 		vdso.name = "";
 		vdso.shortname = "linux-gate.so.1";
-		vdso.global = 1;
 		vdso.relocated = 1;
 		decode_dyn(&vdso);
-		vdso.prev = &ldso;
-		ldso.next = &vdso;
+		vdso.prev = tail;
+		tail->next = &vdso;
+		tail = &vdso;
 	}
-
-	/* Initial dso chain consists only of the app. */
-	head = tail = &app;
-
-	/* Donate unused parts of app and library mapping to malloc */
-	reclaim_gaps(&app);
-	reclaim_gaps(&ldso);
-
-	/* Load preload/needed libraries, add their symbols to the global
-	 * namespace, and perform all remaining relocations. */
-	if (env_preload) load_preload(env_preload);
-	load_deps(&app);
-	make_global(&app);
 
 	for (i=0; app.dynv[i]; i+=2) {
 		if (!DT_DEBUG_INDIRECT && app.dynv[i]==DT_DEBUG)
@@ -1641,15 +1689,39 @@ _Noreturn void __dls3(size_t *sp)
 	debug.state = 0;
 	_dl_debug_state();
 
+	if (replace_argv0) argv[0] = replace_argv0;
+
 	errno = 0;
 
 	CRTJMP((void *)aux[AT_ENTRY], argv-1);
 	for(;;);
 }
 
+static void prepare_lazy(struct dso *p)
+{
+	size_t dyn[DYN_CNT], n, flags1=0;
+	decode_vec(p->dynv, dyn, DYN_CNT);
+	search_vec(p->dynv, &flags1, DT_FLAGS_1);
+	if (dyn[DT_BIND_NOW] || (dyn[DT_FLAGS] & DF_BIND_NOW) || (flags1 & DF_1_NOW))
+		return;
+	n = dyn[DT_RELSZ]/2 + dyn[DT_RELASZ]/3 + dyn[DT_PLTRELSZ]/2 + 1;
+	if (NEED_MIPS_GOT_RELOCS) {
+		size_t j=0; search_vec(p->dynv, &j, DT_MIPS_GOTSYM);
+		size_t i=0; search_vec(p->dynv, &i, DT_MIPS_SYMTABNO);
+		n += i-j;
+	}
+	p->lazy = calloc(n, 3*sizeof(size_t));
+	if (!p->lazy) {
+		error("Error preparing lazy relocation for %s: %m", p->name);
+		longjmp(*rtld_fail, 1);
+	}
+	p->lazy_next = lazy_head;
+	lazy_head = p;
+}
+
 void *dlopen(const char *file, int mode)
 {
-	struct dso *volatile p, *orig_tail, *next;
+	struct dso *volatile p, *orig_tail, *orig_syms_tail, *orig_lazy_head, *next;
 	struct tls_module *orig_tls_tail;
 	size_t orig_tls_cnt, orig_tls_offset, orig_tls_align;
 	size_t i;
@@ -1667,15 +1739,15 @@ void *dlopen(const char *file, int mode)
 	orig_tls_cnt = tls_cnt;
 	orig_tls_offset = tls_offset;
 	orig_tls_align = tls_align;
+	orig_lazy_head = lazy_head;
+	orig_syms_tail = syms_tail;
 	orig_tail = tail;
 	noload = mode & RTLD_NOLOAD;
 
 	rtld_fail = &jb;
 	if (setjmp(*rtld_fail)) {
 		/* Clean up anything new that was (partially) loaded */
-		if (p && p->deps) for (i=0; p->deps[i]; i++)
-			if (p->deps[i]->global < 0)
-				p->deps[i]->global = 0;
+		revert_syms(orig_syms_tail);
 		for (p=orig_tail->next; p; p=next) {
 			next = p->next;
 			while (p->td_index) {
@@ -1686,15 +1758,18 @@ void *dlopen(const char *file, int mode)
 			free(p->funcdescs);
 			if (p->rpath != p->rpath_orig)
 				free(p->rpath);
-			free(p->deps);
+			if (p->deps != &nodeps_dummy)
+				free(p->deps);
 			unmap_library(p);
 			free(p);
 		}
 		if (!orig_tls_tail) libc.tls_head = 0;
 		tls_tail = orig_tls_tail;
+		if (tls_tail) tls_tail->next = 0;
 		tls_cnt = orig_tls_cnt;
 		tls_offset = orig_tls_offset;
 		tls_align = orig_tls_align;
+		lazy_head = orig_lazy_head;
 		tail = orig_tail;
 		tail->next = 0;
 		p = 0;
@@ -1710,24 +1785,37 @@ void *dlopen(const char *file, int mode)
 	}
 
 	/* First load handling */
-	if (!p->deps) {
+	int first_load = !p->deps;
+	if (first_load) {
 		load_deps(p);
-		if (p->deps) for (i=0; p->deps[i]; i++)
-			if (!p->deps[i]->global)
-				p->deps[i]->global = -1;
-		if (!p->global) p->global = -1;
+		if (!p->relocated && (mode & RTLD_LAZY)) {
+			prepare_lazy(p);
+			for (i=0; p->deps[i]; i++)
+				if (!p->deps[i]->relocated)
+					prepare_lazy(p->deps[i]);
+		}
+	}
+	if (first_load || (mode & RTLD_GLOBAL)) {
+		/* Make new symbols global, at least temporarily, so we can do
+		 * relocations. If not RTLD_GLOBAL, this is reverted below. */
+		add_syms(p);
+		for (i=0; p->deps[i]; i++)
+			add_syms(p->deps[i]);
+	}
+	if (first_load) {
 		reloc_all(p);
-		if (p->deps) for (i=0; p->deps[i]; i++)
-			if (p->deps[i]->global < 0)
-				p->deps[i]->global = 0;
-		if (p->global < 0) p->global = 0;
 	}
 
-	if (mode & RTLD_GLOBAL) {
-		if (p->deps) for (i=0; p->deps[i]; i++)
-			p->deps[i]->global = 1;
-		p->global = 1;
-	}
+	/* If RTLD_GLOBAL was not specified, undo any new additions
+	 * to the global symbol table. This is a nop if the library was
+	 * previously loaded and already global. */
+	if (!(mode & RTLD_GLOBAL))
+		revert_syms(orig_syms_tail);
+
+	/* Processing of deferred lazy relocations must not happen until
+	 * the new libraries are committed; otherwise we could end up with
+	 * relocations resolved to symbol definitions that get removed. */
+	redo_lazy_relocs();
 
 	update_tls_size();
 	_dl_debug_state();
@@ -1774,7 +1862,7 @@ static void *addr2dso(size_t a)
 	return 0;
 }
 
-void *__tls_get_addr(size_t *);
+void *__tls_get_addr(tls_mod_off_t *);
 
 static void *do_dlsym(struct dso *p, const char *s, void *ra)
 {
@@ -1792,7 +1880,7 @@ static void *do_dlsym(struct dso *p, const char *s, void *ra)
 		struct symdef def = find_sym(p, s, 0);
 		if (!def.sym) goto failed;
 		if ((def.sym->st_info&0xf) == STT_TLS)
-			return __tls_get_addr((size_t []){def.dso->tls_id, def.sym->st_value});
+			return __tls_get_addr((tls_mod_off_t []){def.dso->tls_id, def.sym->st_value});
 		if (DL_FDPIC && (def.sym->st_info&0xf) == STT_FUNC)
 			return def.dso->funcdescs + (def.sym - def.dso->syms);
 		return laddr(def.dso, def.sym->st_value);
@@ -1807,12 +1895,12 @@ static void *do_dlsym(struct dso *p, const char *s, void *ra)
 		sym = sysv_lookup(s, h, p);
 	}
 	if (sym && (sym->st_info&0xf) == STT_TLS)
-		return __tls_get_addr((size_t []){p->tls_id, sym->st_value});
+		return __tls_get_addr((tls_mod_off_t []){p->tls_id, sym->st_value});
 	if (DL_FDPIC && sym && sym->st_shndx && (sym->st_info&0xf) == STT_FUNC)
 		return p->funcdescs + (sym - p->syms);
 	if (sym && sym->st_value && (1<<(sym->st_info&0xf) & OK_TYPES))
 		return laddr(p, sym->st_value);
-	if (p->deps) for (i=0; p->deps[i]; i++) {
+	for (i=0; p->deps[i]; i++) {
 		if ((ght = p->deps[i]->ghashtab)) {
 			if (!gh) gh = gnu_hash(s);
 			sym = gnu_lookup(gh, ght, p->deps[i], s);
@@ -1821,7 +1909,7 @@ static void *do_dlsym(struct dso *p, const char *s, void *ra)
 			sym = sysv_lookup(s, h, p->deps[i]);
 		}
 		if (sym && (sym->st_info&0xf) == STT_TLS)
-			return __tls_get_addr((size_t []){p->deps[i]->tls_id, sym->st_value});
+			return __tls_get_addr((tls_mod_off_t []){p->deps[i]->tls_id, sym->st_value});
 		if (DL_FDPIC && sym && sym->st_shndx && (sym->st_info&0xf) == STT_FUNC)
 			return p->deps[i]->funcdescs + (sym - p->deps[i]->syms);
 		if (sym && sym->st_value && (1<<(sym->st_info&0xf) & OK_TYPES))

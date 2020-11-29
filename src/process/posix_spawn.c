@@ -73,6 +73,10 @@ static int child(void *args_vp)
 		__libc_sigaction(i, &sa, 0);
 	}
 
+	if (attr->__flags & POSIX_SPAWN_SETSID)
+		if ((ret=__syscall(SYS_setsid)) < 0)
+			goto fail;
+
 	if (attr->__flags & POSIX_SPAWN_SETPGROUP)
 		if ((ret=__syscall(SYS_setpgid, 0, attr->__pgrp)))
 			goto fail;
@@ -148,7 +152,7 @@ int __posix_spawnx(pid_t *restrict res, const char *restrict path,
 	char *const argv[restrict], char *const envp[restrict])
 {
 	pid_t pid;
-	char stack[1024];
+	char stack[1024+PATH_MAX];
 	int ec=0, cs;
 	struct args args;
 
