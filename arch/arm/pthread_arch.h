@@ -1,30 +1,32 @@
-#if ((__ARM_ARCH_6K__ || __ARM_ARCH_6ZK__) && !__thumb__) \
+#if ((__ARM_ARCH_6K__ || __ARM_ARCH_6KZ__ || __ARM_ARCH_6ZK__) && !__thumb__) \
  || __ARM_ARCH_7A__ || __ARM_ARCH_7R__ || __ARM_ARCH >= 7
 
-static inline pthread_t __pthread_self()
+static inline uintptr_t __get_tp()
 {
-	char *p;
-	__asm__ __volatile__ ( "mrc p15,0,%0,c13,c0,3" : "=r"(p) );
-	return (void *)(p+8-sizeof(struct pthread));
+	uintptr_t tp;
+	__asm__ ( "mrc p15,0,%0,c13,c0,3" : "=r"(tp) );
+	return tp;
 }
 
 #else
 
-static inline pthread_t __pthread_self()
-{
-#ifdef __clang__
-	char *p;
-	__asm__ __volatile__ ( "bl __a_gettp\n\tmov %0,r0" : "=r"(p) : : "cc", "r0", "lr" );
+#if __ARM_ARCH_4__ || __ARM_ARCH_4T__ || __ARM_ARCH == 4
+#define BLX "mov lr,pc\n\tbx"
 #else
-	register char *p __asm__("r0");
-	__asm__ __volatile__ ( "bl __a_gettp" : "=r"(p) : : "cc", "lr" );
+#define BLX "blx"
 #endif
-	return (void *)(p+8-sizeof(struct pthread));
+
+static inline uintptr_t __get_tp()
+{
+	extern hidden uintptr_t __a_gettp_ptr;
+	register uintptr_t tp __asm__("r0");
+	__asm__ ( BLX " %1" : "=r"(tp) : "r"(__a_gettp_ptr) : "cc", "lr" );
+	return tp;
 }
 
 #endif
 
 #define TLS_ABOVE_TP
-#define TP_ADJ(p) ((char *)(p) + sizeof(struct pthread) - 8)
+#define GAP_ABOVE_TP 8
 
 #define MC_PC arm_pc

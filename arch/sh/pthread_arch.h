@@ -1,11 +1,16 @@
-static inline struct pthread *__pthread_self()
+static inline uintptr_t __get_tp()
 {
-	char *self;
-	__asm__ __volatile__ ("stc gbr,%0" : "=r" (self) );
-	return (struct pthread *) (self + 8 - sizeof(struct pthread));
+	uintptr_t tp;
+	__asm__ ("stc gbr,%0" : "=r" (tp) );
+	return tp;
 }
 
 #define TLS_ABOVE_TP
-#define TP_ADJ(p) ((char *)(p) + sizeof(struct pthread) - 8)
+#define GAP_ABOVE_TP 8
 
-#define MC_PC sc_pc
+#define MC_PC pc
+
+#ifdef __FDPIC__
+#define MC_GOT gregs[12]
+#define CANCEL_GOT (*(uintptr_t *)((char *)__syscall_cp_asm+sizeof(uintptr_t)))
+#endif
