@@ -15,14 +15,29 @@
 
 #define pthread __pthread
 
+#ifdef __EMSCRIPTEN__
+#define EM_THREAD_NAME_MAX 32
+
+typedef struct thread_profiler_block {
+	// One of THREAD_STATUS_*
+	int threadStatus;
+	// Wallclock time denoting when the current thread state was entered in.
+	double currentStatusStartTime;
+	// Accumulated duration times denoting how much time has been spent in each
+	// state, in msecs.
+	double timeSpentInStatus[EM_THREAD_STATUS_NUMFIELDS];
+	// A human-readable name for this thread.
+	char name[EM_THREAD_NAME_MAX];
+} thread_profiler_block;
+#endif
+
 struct pthread {
 // XXX Emscripten: Need some custom thread control structures.
 #ifdef __EMSCRIPTEN__
 	// Note: The specific order of these fields is important, since these are accessed
 	// by direct pointer arithmetic in worker.js.
-	int threadStatus; // 0: thread not exited, 1: exited.
-	int threadExitCode; // Thread exit code.
-	void *profilerBlock; // If --threadprofiler is enabled, this pointer is allocated to contain internal information about the thread state for profiling purposes.
+	_Atomic int threadStatus; // 0: thread not exited, 1: exited.
+	thread_profiler_block * _Atomic profilerBlock; // If --threadprofiler is enabled, this pointer is allocated to contain internal information about the thread state for profiling purposes.
 #endif
 
 	struct pthread *self;
@@ -97,7 +112,7 @@ struct __timer {
 // XXX Emscripten: The spec allows detecting when multiple write locks would deadlock, so use an extra field
 // _rw_wr_owner to record which thread owns the write lock in order to avoid hangs.
 // Points to the pthread that currently has the write lock.
-#define _rw_wr_owner __u.__vi[3]
+#define _rw_wr_owner __u.__p[3]
 #endif
 #define _b_lock __u.__vi[0]
 #define _b_waiters __u.__vi[1]
@@ -164,15 +179,14 @@ void __block_all_sigs(void *);
 void __block_app_sigs(void *);
 void __restore_sigs(void *);
 
+#ifdef __EMSCRIPTEN__
+// Keep in sync with DEFAULT_PTHREAD_STACK_SIZE in settings.js
+#define DEFAULT_STACK_SIZE (2*1024*1024)
+#else
 #define DEFAULT_STACK_SIZE 81920
+#endif
 #define DEFAULT_GUARD_SIZE PAGE_SIZE
 
 #define __ATTRP_C11_THREAD ((void*)(uintptr_t)-1)
 
-#ifdef __EMSCRIPTEN__
-void __emscripten_init_pthread(pthread_t thread);
-#if !__EMSCRIPTEN_PTHREADS__
-pthread_t __emscripten_pthread_stub(void);
-#endif
-#endif
 #endif
