@@ -1,11 +1,11 @@
-static inline struct pthread *__pthread_self()
+static inline uintptr_t __get_tp()
 {
-	char *self;
-	__asm__ __volatile__ ("mrs %0,tpidr_el0" : "=r"(self));
-	return (void*)(self + 16 - sizeof(struct pthread));
+	uintptr_t tp;
+	__asm__ ("mrs %0,tpidr_el0" : "=r"(tp));
+	return tp;
 }
 
 #define TLS_ABOVE_TP
-#define TP_ADJ(p) ((char *)(p) + sizeof(struct pthread) - 16)
+#define GAP_ABOVE_TP 16
 
 #define MC_PC pc
