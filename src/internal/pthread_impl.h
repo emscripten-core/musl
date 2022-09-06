@@ -11,28 +11,13 @@
 #include "atomic.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten/threading.h>
+#include "threading_internal.h"
 #endif
 #include "futex.h"
 
 #include "pthread_arch.h"
 
 #define pthread __pthread
-
-#ifdef __EMSCRIPTEN__
-#define EM_THREAD_NAME_MAX 32
-
-typedef struct thread_profiler_block {
-	// One of THREAD_STATUS_*
-	_Atomic int threadStatus;
-	// Wallclock time denoting when the current thread state was entered in.
-	double currentStatusStartTime;
-	// Accumulated duration times denoting how much time has been spent in each
-	// state, in msecs.
-	double timeSpentInStatus[EM_THREAD_STATUS_NUMFIELDS];
-	// A human-readable name for this thread.
-	char name[EM_THREAD_NAME_MAX];
-} thread_profiler_block;
-#endif
 
 struct pthread {
 	/* Part 1 -- these fields may be external or
@@ -41,7 +26,8 @@ struct pthread {
 #ifndef TLS_ABOVE_TP
 	uintptr_t *dtv;
 #endif
-	struct pthread *prev, *next; /* non-ABI */
+	// TODO(sbc): Implement circular list of threads
+	//struct pthread *prev, *next; /* non-ABI */
 	uintptr_t sysinfo;
 #ifndef TLS_ABOVE_TP
 #ifdef CANARY_PAD
@@ -90,6 +76,9 @@ struct pthread {
 	// If --threadprofiler is enabled, this pointer is allocated to contain
 	// internal information about the thread state for profiling purposes.
 	thread_profiler_block * _Atomic profilerBlock;
+	// The TLS base to use the main module TLS data.  Secondary modules
+	// still require dynamic allocation.
+	void* tls_base;
 #endif
 };
 
@@ -129,7 +118,7 @@ enum {
 // XXX Emscripten: The spec allows detecting when multiple write locks would deadlock, so use an extra field
 // _rw_wr_owner to record which thread owns the write lock in order to avoid hangs.
 // Points to the pthread that currently has the write lock.
-#define _rw_wr_owner __u.__p[3]
+#define _rw_wr_owner __u.__vi[3]
 #endif
 #define _b_lock __u.__vi[0]
 #define _b_waiters __u.__vi[1]
