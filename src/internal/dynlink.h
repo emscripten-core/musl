@@ -13,12 +13,8 @@
 #include <emscripten/emscripten.h>
 
 struct dso {
-  struct dso *next, *prev;
-
-  // For async mode
-  em_dlopen_callback onsuccess;
-  em_arg_callback_func onerror;
-  void* user_data;
+  // Pointer back to the dlevent in the event sequence which loaded this DSO.
+  struct dlevent* event;
 
   // Flags used to open the library.  We need to cache these so that other
   // threads can mirror the open library state.
@@ -32,6 +28,12 @@ struct dso {
   size_t mem_size;
   void* table_addr;
   size_t table_size;
+
+  // For DSO load events, where the DSO comes from a file on disc, this
+  // is a pointer the file data read in by the laoding thread and shared with
+  // others.
+  uint8_t* file_data;
+  size_t file_data_size;
 
   // Flexible array; must be final element of struct
   char name[];
