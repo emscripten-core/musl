@@ -139,6 +139,7 @@ static int fstatat_kstat(int fd, const char *restrict path, struct stat *restric
 	return 0;
 }
 #endif
+#endif
 
 int __fstatat(int fd, const char *restrict path, struct stat *restrict st, int flag)
 {

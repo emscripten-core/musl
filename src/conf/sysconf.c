@@ -4,7 +4,9 @@
 #include <sys/resource.h>
 #include <signal.h>
 #include <sys/sysinfo.h>
+#ifndef __EMSCRIPTEN__
 #include <sys/auxv.h>
+#endif
 #include "syscall.h"
 #include "libc.h"
 
@@ -230,7 +232,6 @@ long sysconf(int name)
 		mem *= si.mem_unit;
 		mem /= PAGE_SIZE;
 		return (mem > LONG_MAX) ? LONG_MAX : mem;
-#endif
 	case JT_MINSIGSTKSZ & 255:
 	case JT_SIGSTKSZ & 255: ;
 		long val = __getauxval(AT_MINSIGSTKSZ);
@@ -238,6 +239,7 @@ long sysconf(int name)
 		if (values[name] == JT_SIGSTKSZ)
 			val += SIGSTKSZ - MINSIGSTKSZ;
 		return val;
+#endif
 	case JT_ZERO & 255:
 		return 0;
 	}
