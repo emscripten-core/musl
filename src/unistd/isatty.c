@@ -1,6 +1,3 @@
-#ifdef __EMSCRIPTEN__
-#include <errno.h>
-#endif
 #include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
